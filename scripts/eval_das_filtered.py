@@ -73,6 +73,9 @@ def load_model(ckpt_path: Path, device: torch.device):
     if mname == "edge_compat":
         from omtf_gmt.models import build_edge_compat
         model = build_edge_compat(hidden=hdim, dropout=drop)
+    elif mname == "edge_compat_dxy":
+        from omtf_gmt.models import build_edge_compat_dxy
+        model = build_edge_compat_dxy(hidden=hdim, dropout=drop)
     elif mname == "edge_compat_assign":
         from omtf_gmt.models.edge_compat_assign import build_edge_compat_assign
         model = build_edge_compat_assign(hidden=hdim, dropout=drop)

@@ -166,12 +166,14 @@ def _transfer_tps(
 
 # ----- file-level builder --------------------------------------------------
 
-def _load_nano_event_map(nano_path: Path) -> dict[int, dict]:
+def _load_nano_event_map(nano_path: Path, require_dxy: bool = False) -> dict[int, dict]:
     """Return dict: uint32(event) → {gen_pt, gen_charge, gen_dxy, tps_stubs}."""
     tree = uproot.open(str(nano_path))["Events"]
     available = set(tree.keys())
     branches  = TPS_BRANCHES_REQUIRED + [b for b in TPS_BRANCHES_OPTIONAL if b in available]
     has_dxy   = "GenMuon_dXY" in available
+    if require_dxy and not has_dxy:
+        raise ValueError(f"{nano_path} does not contain required GenMuon_dXY branch")
     arr = tree.arrays(branches, library="ak")
 
     event_map: dict[int, dict] = {}
@@ -343,8 +345,9 @@ def process_file_pair(
     nano_path:   Path,
     is_hard_neg: bool = False,
     verbose:     bool = False,
+    require_dxy: bool = False,
 ) -> list[dict]:
-    nano_map = _load_nano_event_map(nano_path)
+    nano_map = _load_nano_event_map(nano_path, require_dxy=require_dxy)
 
     hits_tree = uproot.open(str(hits_path))["simOmtfPhase2Digis/OMTFAllInputTree"]
     arr = hits_tree.arrays(OMTF_HITS_BRANCHES, library="ak")
@@ -387,6 +390,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output-dir", type=Path, default=Path("build/omtf_gmt/cache_v2_tps"))
     p.add_argument("--max-files", type=int, default=None)
     p.add_argument("--shard-size", type=int, default=SHARD_SIZE)
+    p.add_argument("--require-dxy", action="store_true",
+                   help="fail if any NanoAOD file lacks GenMuon_dXY")
     p.add_argument("--quiet", action="store_true")
     return p.parse_args()
 
@@ -440,7 +445,10 @@ def main() -> None:
                     print(f"  [{ds}] missing nano for {hits_path.name}, skipping")
                 continue
 
-            samples = process_file_pair(hits_path, nano_path, is_hard_neg=is_hard_neg)
+            samples = process_file_pair(
+                hits_path, nano_path, is_hard_neg=is_hard_neg,
+                require_dxy=args.require_dxy,
+            )
             pending.extend(samples)
             n_files += 1
 
@@ -470,6 +478,7 @@ def main() -> None:
             "n_files":      n_files,
             "is_hard_neg":  is_hard_neg,
             "base_dataset": base_ds,
+            "gen_dxy_required": args.require_dxy,
         }
         if verbose:
             print(f"\n  [{ds}] done — {n_total:,} samples in {elapsed:.0f}s")

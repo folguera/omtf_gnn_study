@@ -156,6 +156,9 @@ def load_model(ckpt_path: Path, device: torch.device):
         model = build_deepsets(hidden=hdim, dropout=dropout)
     elif mname == "edge_compat":
         model = build_edge_compat(hidden=hdim, dropout=dropout)
+    elif mname == "edge_compat_dxy":
+        from omtf_gmt.models import build_edge_compat_dxy
+        model = build_edge_compat_dxy(hidden=hdim, dropout=dropout)
     elif mname == "edge_compat_assign":
         from omtf_gmt.models.edge_compat_assign import build_edge_compat_assign
         model = build_edge_compat_assign(hidden=hdim, dropout=dropout)
@@ -243,6 +246,8 @@ def eval_dataset(
     pt_rel_err: list[float] = []
     pt_log_err: list[float] = []
     pt_abs_err: list[float] = []
+    dxy_abs_err: list[float] = []
+    dxy_signed_err: list[float] = []
 
     # Zero-window stats.
     n_zero_windows = 0
@@ -278,6 +283,7 @@ def eval_dataset(
         node_logit = out["node_logit"]
         cand_logits = out["candidate_logits"]
         pt_pred = positive_pt(out["pt_pred"])
+        dxy_pred = out.get("dxy_pred")
 
         # ---- stub-level recall and fake rate ----
         nl_valid = nl[vm].bool()
@@ -312,6 +318,7 @@ def eval_dataset(
         gpt_np = gpt.cpu().numpy()
         gd0_np = gd0.cpu().numpy()
         pt_pred_np = pt_pred.cpu().numpy()
+        dxy_pred_np = dxy_pred.cpu().numpy() if dxy_pred is not None else None
 
         for k in range(K_MAX):
             mask = sig_np[:, k]
@@ -332,6 +339,10 @@ def eval_dataset(
             pt_abs_err.extend(np.abs(pred - tgt).tolist())
             pt_rel_err.extend(((pred - tgt) / safe_tgt).tolist())
             pt_log_err.extend((np.log1p(safe_pred) - np.log1p(safe_tgt)).tolist())
+            if dxy_pred_np is not None:
+                dxy_residual = dxy_pred_np[:, k][mask] - gd0_np[:, k][mask]
+                dxy_abs_err.extend(np.abs(dxy_residual).tolist())
+                dxy_signed_err.extend(dxy_residual.tolist())
 
         # ---- zero-candidate stats at chosen threshold ----
         zero_win = sig_slots.sum(dim=1) == 0
@@ -400,6 +411,8 @@ def eval_dataset(
     pt_rel_np = np.array(pt_rel_err, dtype=np.float32)
     pt_log_np = np.array(pt_log_err, dtype=np.float32)
     pt_abs_np = np.array(pt_abs_err, dtype=np.float32)
+    dxy_abs_np = np.array(dxy_abs_err, dtype=np.float32)
+    dxy_signed_np = np.array(dxy_signed_err, dtype=np.float32)
 
     roc = []
     for thr in sorted(roc_counts):
@@ -452,6 +465,11 @@ def eval_dataset(
             "sigma68_rel_err": _sigma68(pt_rel_np),
             "mae_log_pt": float(np.mean(np.abs(pt_log_np))) if pt_log_np.size else None,
             "sigma68_log_pt": _sigma68(pt_log_np),
+        },
+        "dxy_metrics": {
+            "n": int(dxy_abs_np.size),
+            "mae_cm": float(np.mean(dxy_abs_np)) if dxy_abs_np.size else None,
+            "bias_cm": float(np.mean(dxy_signed_np)) if dxy_signed_np.size else None,
         },
         "roc": roc,
         "zero_threshold_scan": zero_scan,
@@ -768,6 +786,21 @@ def render_report(
             f"| {_format_opt_float(pm['sigma68_rel_err'])} "
             f"| {_format_opt_float(pm['mae_log_pt'])} "
             f"| {_format_opt_float(pm['sigma68_log_pt'])} |"
+        )
+    lines.append("")
+
+    # ---- dxy regression metrics ----
+    lines += ["## Signed dxy regression metrics\n"]
+    lines += [
+        "| Dataset | N signal slots | MAE dxy [cm] | Mean residual [cm] |",
+        "| --- | ---: | ---: | ---: |",
+    ]
+    for r in results:
+        dm = r["dxy_metrics"]
+        lines.append(
+            f"| {r['ds']} | {dm['n']:,} "
+            f"| {_format_opt_float(dm['mae_cm'])} "
+            f"| {_format_opt_float(dm['bias_cm'])} |"
         )
     lines.append("")
 

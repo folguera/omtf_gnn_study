@@ -37,7 +37,7 @@ _REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO / "src"))
 
 from omtf_gmt.dataset import GMTCachedDataset, collate_gmt, expand_datasets, expand_repeats
-from omtf_gmt.models  import build_deepsets, build_edge_compat, build_edge_compat_assign, build_slot_model, build_seq_slot, build_count_model, build_detr_model
+from omtf_gmt.models  import build_deepsets, build_edge_compat, build_edge_compat_dxy, build_edge_compat_assign, build_slot_model, build_seq_slot, build_count_model, build_detr_model
 from omtf_gmt.models.edge_compat_assign import assignment_supervision_loss
 from omtf_gmt.models.slot_model import (
     candidate_count_loss,
@@ -68,6 +68,7 @@ def compute_loss(
     w_hard_neg:       float = 0.0,
     unmatched_weight: float = 1.0,
     w_assign:         float = 0.0,
+    w_dxy:            float = 1.0,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     vm  = batch["valid_mask"]              # (N, 24)
     nl  = batch["node_label"]              # (N, 24)
@@ -112,6 +113,16 @@ def compute_loss(
         "cand_loss": cand_loss.item(),
         "pt_loss":   pt_loss.item(),
     }
+
+    if w_dxy > 0.0 and "dxy_pred" in out:
+        dxy_mask = cand_target > 0.5
+        dxy_loss = torch.tensor(0.0, device=node_logit.device)
+        if dxy_mask.any():
+            dxy_loss = F.smooth_l1_loss(
+                out["dxy_pred"][dxy_mask], batch["gen_dxy"][dxy_mask]
+            )
+        total = total + w_dxy * dxy_loss
+        breakdown["dxy_loss"] = dxy_loss.item()
 
     # explicit hard-negative candidate loss: push all slots negative for G7/G8/G9/G10 windows
     if w_hard_neg > 0.0:
@@ -355,7 +366,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--repeat",       nargs="*", default=["B4:8"], metavar="DS:N",
                    help="per-dataset train-split repeat factors, e.g. --repeat B4:8 S4:2")
     p.add_argument("--model",        default="deepsets",
-                   choices=["deepsets", "edge_compat", "edge_compat_assign",
+                   choices=["deepsets", "edge_compat", "edge_compat_dxy", "edge_compat_assign",
                             "slot_model", "seq_slot", "count_model", "detr_model"])
     p.add_argument("--hidden",       type=int,   default=64)
     p.add_argument("--dropout",      type=float, default=0.0)
@@ -365,6 +376,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--w-node",       type=float, default=1.0)
     p.add_argument("--w-cand",       type=float, default=1.0)
     p.add_argument("--w-pt",         type=float, default=0.5)
+    p.add_argument("--w-dxy",        type=float, default=1.0,
+                   help="signed gen-muon dxy Smooth L1 loss weight (cm; edge_compat_dxy only)")
     p.add_argument("--w-count",      type=float, default=0.0,
                    help="candidate-count MSE loss weight (slot_model only)")
     p.add_argument("--w-div",        type=float, default=0.0,
@@ -399,6 +412,19 @@ def main() -> None:
     device = torch.device(args.device)
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
+    dataset_names = expand_datasets(args.datasets)
+    if args.model == "edge_compat_dxy":
+        cache_manifest = json.loads((args.cache_dir / "manifest.json").read_text())
+        unchecked = [
+            ds for ds in dataset_names
+            if not cache_manifest.get("datasets", {}).get(ds, {}).get("gen_dxy_required", False)
+        ]
+        if unchecked:
+            raise ValueError(
+                "The edge_compat_dxy model requires caches rebuilt with "
+                f"--require-dxy; unverified datasets: {', '.join(unchecked)}"
+            )
+
     if device.type == "cuda":
         torch.backends.cudnn.benchmark        = True  # autotune kernels for fixed input shapes
         torch.backends.cuda.matmul.allow_tf32 = True  # A100 TF32 tensor cores for fp32 matmuls
@@ -412,7 +438,7 @@ def main() -> None:
     val_parts:   list = []
     ds_sizes: list[tuple[str, int, int]] = []   # (name, n_train_1x, n_repeat)
 
-    for ds in expand_datasets(args.datasets):
+    for ds in dataset_names:
         full  = GMTCachedDataset(args.cache_dir, ds)
         n     = len(full)
         n_tr  = int(0.85 * n)
@@ -486,6 +512,8 @@ def main() -> None:
         model = build_deepsets(hidden=args.hidden, dropout=args.dropout)
     elif args.model == "edge_compat":
         model = build_edge_compat(hidden=args.hidden, dropout=args.dropout)
+    elif args.model == "edge_compat_dxy":
+        model = build_edge_compat_dxy(hidden=args.hidden, dropout=args.dropout)
     elif args.model == "edge_compat_assign":
         model = build_edge_compat_assign(hidden=args.hidden, dropout=args.dropout)
     elif args.model == "slot_model":
@@ -534,7 +562,7 @@ def main() -> None:
                     loss, bd = compute_loss(out, batch, args.w_node, args.w_cand, args.w_pt,
                                        args.w_count, args.w_div, args.w_null, args.w_attn,
                                        args.w_hard_neg, args.unmatched_stub_weight,
-                                       args.w_assign)
+                                       args.w_assign, args.w_dxy)
             opt.zero_grad()
             scaler.scale(loss).backward()
             scaler.unscale_(opt)
@@ -567,7 +595,7 @@ def main() -> None:
                         loss, _ = compute_loss(out, batch, args.w_node, args.w_cand, args.w_pt,
                                        args.w_count, args.w_div, args.w_null, args.w_attn,
                                        args.w_hard_neg, args.unmatched_stub_weight,
-                                       args.w_assign)
+                                       args.w_assign, args.w_dxy)
                 val_loss += loss.item()
                 m = quick_metrics(out, batch)
                 for k in val_metrics:
