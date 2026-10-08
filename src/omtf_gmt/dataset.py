@@ -100,7 +100,7 @@ class GMTCachedDataset(Dataset):
         cache_dir = Path(cache_dir)
         self._validate_manifest(cache_dir, dataset)
 
-        stubs_l, vm_l, tid_l, amb_l, nl_l, ts_l = [], [], [], [], [], []
+        stubs_l, vm_l, tid_l, amb_l, nl_l, ts_l, target_tid_l = [], [], [], [], [], [], []
         gpt_l, gc_l, gd_l = [], [], []
         men_l, mip_l, mns_l, mng_l, mhn_l = [], [], [], [], []
 
@@ -109,6 +109,8 @@ class GMTCachedDataset(Dataset):
             stubs_l.append(s["stubs"])
             vm_l.append(s["valid_mask"])
             tid_l.append(s["track_id"])
+            if "target_track_id" in s:
+                target_tid_l.append(s["target_track_id"])
             amb_l.append(s["ambiguous"])
             nl_l.append(s["node_label"])
             ts_l.append(s["truth_source"])
@@ -124,6 +126,9 @@ class GMTCachedDataset(Dataset):
         self.stubs        = torch.cat(stubs_l)
         self.valid_mask   = torch.cat(vm_l)
         self.track_id     = torch.cat(tid_l)
+        self.target_track_id = (
+            torch.cat(target_tid_l) if len(target_tid_l) == len(tid_l) else None
+        )
         self.ambiguous    = torch.cat(amb_l)
         self.node_label   = torch.cat(nl_l)
         self.truth_source = torch.cat(ts_l)
@@ -140,7 +145,7 @@ class GMTCachedDataset(Dataset):
         return self.stubs.shape[0]
 
     def __getitem__(self, idx: int) -> dict:
-        return {
+        sample = {
             "stubs":        self.stubs[idx],
             "valid_mask":   self.valid_mask[idx],
             "track_id":     self.track_id[idx],
@@ -158,6 +163,9 @@ class GMTCachedDataset(Dataset):
                 "is_hard_neg":  bool(self.meta_is_hard_neg[idx]),
             },
         }
+        if self.target_track_id is not None:
+            sample["target_track_id"] = self.target_track_id[idx]
+        return sample
 
     @staticmethod
     def _validate_manifest(cache_dir: Path, dataset: str) -> None:
@@ -170,7 +178,7 @@ class GMTCachedDataset(Dataset):
 
 def collate_gmt(batch: list[dict]) -> dict:
     """Collate a list of samples into batched tensors."""
-    return {
+    collated = {
         "stubs":        torch.stack([b["stubs"] for b in batch]),
         "valid_mask":   torch.stack([b["valid_mask"] for b in batch]),
         "track_id":     torch.stack([b["track_id"] for b in batch]),
@@ -182,3 +190,6 @@ def collate_gmt(batch: list[dict]) -> dict:
         "gen_dxy":      torch.stack([b["gen_dxy"] for b in batch]),
         "meta":         [b["meta"] for b in batch],
     }
+    if "target_track_id" in batch[0]:
+        collated["target_track_id"] = torch.stack([b["target_track_id"] for b in batch])
+    return collated

@@ -139,10 +139,12 @@ def assignment_supervision_loss(
     track_id:       torch.Tensor,   # (B, Nmax)  int8, values 0..K
     valid_mask:     torch.Tensor,   # (B, Nmax)  bool
     gen_pt:         torch.Tensor,   # (B, K)     float32
+    target_track_id: torch.Tensor | None = None,  # (B, K) packed-slot → original track ID
 ) -> torch.Tensor:
     """
-    Weighted cross-entropy: each active slot is supervised to attend to its
-    own true stubs (track_id == k+1) with uniform weight over those stubs.
+    Weighted cross-entropy: each active slot attends to its own true stubs.
+    When supplied, target_track_id maps packed slots to original track IDs.
+    Otherwise slots are assumed to map to IDs 1..K.
 
     Only applies to slots that have at least one true stub.
     Empty slots are not supervised (no NULL-token loss).
@@ -158,8 +160,11 @@ def assignment_supervision_loss(
         if not active.any():
             continue
 
-        # True stubs for slot k: track_id == k+1 and valid
-        true_stubs = ((track_id == k + 1) & valid_mask).float()   # (B, Nmax)
+        target_id = (
+            target_track_id[:, k] if target_track_id is not None
+            else torch.full_like(gen_pt[:, k], k + 1, dtype=track_id.dtype)
+        )
+        true_stubs = ((track_id == target_id.unsqueeze(1)) & valid_mask).float()
         n_true     = true_stubs.sum(dim=1, keepdim=True).clamp(min=1)
         target     = true_stubs / n_true                          # uniform over true stubs
 

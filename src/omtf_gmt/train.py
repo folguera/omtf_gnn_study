@@ -183,6 +183,7 @@ def compute_loss(
         a_loss = assignment_supervision_loss(
             out["assign_weights"], batch["track_id"],
             batch["valid_mask"],   batch["gen_pt"],
+            batch.get("target_track_id"),
         )
         total = total + w_assign * a_loss
         breakdown["assign_loss"] = a_loss.item()
